@@ -493,11 +493,12 @@ function useStoredData() {
 
   return [data, setData];
 }
-async function syncToGoogleSheets(appsScriptUrl, action, payload) {
-  if (!appsScriptUrl) return false;
+async function syncToGoogleSheets(appScriptUrl, action, payload) {
+  const finalUrl = appScriptUrl || DEFAULT_SETTINGS.appScriptUrl;
+  if (!finalUrl) return false;
 
   try {
-    await fetch(appsScriptUrl, {
+    await fetch(finalUrl, {
       method: "POST",
       mode: "no-cors",
       headers: {
