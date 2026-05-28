@@ -493,7 +493,48 @@ function useStoredData() {
 
   return [data, setData];
 }
+async function syncToGoogleSheets(appsScriptUrl, action, payload) {
+  if (!appsScriptUrl) return false;
 
+  try {
+    await fetch(appsScriptUrl, {
+      method: "POST",
+      mode: "no-cors",
+      headers: {
+        "Content-Type": "text/plain;charset=utf-8",
+      },
+      body: JSON.stringify({
+        action,
+        payload,
+      }),
+    });
+
+    return true;
+  } catch (error) {
+    console.error("Google Sheets sync failed:", error);
+    return false;
+  }
+}
+
+function dailyPayloadFromRecord(record) {
+  const checks = record.checks || {};
+
+  return {
+    date: record.date,
+    weekStart: record.weekStart,
+    weekEnd: record.weekEnd,
+    person: record.person,
+    fitness: checks.fitness || false,
+    workSchool: checks.work || checks.school || false,
+    nutrition1: checks.protein || checks.homeMeals || false,
+    nutrition2: checks.calories || checks.water || false,
+    personalInvestment: checks.personal || false,
+    detailsJson: JSON.stringify(record.details || {}),
+    dailyScore: record.dailyScore || 0,
+    timestampSubmitted: record.submittedAt || new Date().toISOString(),
+    lastEditedTimestamp: record.lastEditedAt || new Date().toISOString(),
+  };
+}
 function Ring({ score, label, size = 190, stroke = 16, status, muted = false }) {
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
@@ -631,59 +672,105 @@ function App() {
   const messagePool = MOTIVATION[combined.status];
   const motivation = messagePool[combined.score % messagePool.length];
 
-  function saveCheckIn(person, dateKey, checks, details) {
-    const now = new Date().toISOString();
-    setData((prev) => {
-      const existing = findCheckIn(prev.checkIns, person, dateKey);
-      const record = {
-        date: dateKey,
-        weekStart: toKey(startOfScoringWeek(parseKey(dateKey))),
-        weekEnd: toKey(addDays(startOfScoringWeek(parseKey(dateKey)), 5)),
-        person,
-        checks,
-        details,
-        dailyScore: scoreFromChecks(checks),
-        submittedAt: existing?.submittedAt || now,
-        lastEditedAt: now,
-        synced: false,
-      };
+ function saveCheckIn(person, dateKey, checks, details) {
+  const now = new Date().toISOString();
 
-      return {
-        ...prev,
-        checkIns: existing
-          ? prev.checkIns.map((r) =>
-              r.person === person && r.date === dateKey ? record : r
-            )
-          : [...prev.checkIns, record],
-      };
-    });
-  }
+  const existing = findCheckIn(data.checkIns, person, dateKey);
+
+  const record = {
+    date: dateKey,
+    weekStart: toKey(startOfScoringWeek(parseKey(dateKey))),
+    weekEnd: toKey(addDays(startOfScoringWeek(parseKey(dateKey)), 5)),
+    person,
+    checks,
+    details,
+    dailyScore: scoreFromChecks(checks),
+    submittedAt: existing?.submittedAt || now,
+    lastEditedAt: now,
+    synced: false,
+  };
+
+  setData((prev) => ({
+    ...prev,
+    checkIns: existing
+      ? prev.checkIns.map((r) =>
+          r.person === person && r.date === dateKey ? record : r
+        )
+      : [...prev.checkIns, record],
+  }));
+
+  syncToGoogleSheets(
+    settings.appsScriptUrl,
+    "upsertDailyCheckIn",
+    dailyPayloadFromRecord(record)
+  );
+}
 
   function saveWeight(person, payload) {
-    const now = new Date().toISOString();
-    const weekKey = toKey(startOfScoringWeek(new Date()));
-    setData((prev) => {
-      const existing = prev.weights.find(
-        (w) => w.person === person && w.weekStart === weekKey
-      );
-      const record = {
-        person,
-        weekStart: weekKey,
-        date: toKey(new Date()),
-        ...payload,
-        submittedAt: existing?.submittedAt || now,
-        lastEditedAt: now,
-      };
-      return {
-        ...prev,
-        weights: existing
-          ? prev.weights.map((w) =>
-              w.person === person && w.weekStart === weekKey ? record : w
-            )
-          : [...prev.weights, record],
-      };
-    });
-  }
+  const now = new Date().toISOString();
+  const weekKey = toKey(startOfScoringWeek(new Date()));
+
+  let recordToSync = null;
+
+  setData((prev) => {
+    const existing = prev.weights.find(
+      (w) => w.person === person && w.weekStart === weekKey
+    );
+
+    const previousWeights = prev.weights
+      .filter((w) => w.person === person && w.weekStart !== weekKey)
+      .sort((a, b) => b.weekStart.localeCompare(a.weekStart));
+
+    const previousWeight = previousWeights[0]?.mondayWeight;
+    const changeFromPreviousWeek = previousWeight
+      ? (Number(payload.mondayWeight) - Number(previousWeight)).toFixed(1)
+      : "";
+
+    const startingWeight = payload.startingWeight || prev.startingWeights?.[person] || "";
+    const totalChangeFromStartingWeight = startingWeight
+      ? (Number(payload.mondayWeight) - Number(startingWeight)).toFixed(1)
+      : "";
+
+    const record = {
+      person,
+      weekStart: weekKey,
+      date: toKey(new Date()),
+      startingWeight,
+      mondayWeight: payload.mondayWeight,
+      changeFromPreviousWeek,
+      totalChangeFromStartingWeight,
+      submittedAt: existing?.submittedAt || now,
+      lastEditedAt: now,
+    };
+
+    recordToSync = record;
+
+    return {
+      ...prev,
+      weights: existing
+        ? prev.weights.map((w) =>
+            w.person === person && w.weekStart === weekKey ? record : w
+          )
+        : [...prev.weights, record],
+    };
+  });
+
+  setTimeout(() => {
+    if (recordToSync) {
+      syncToGoogleSheets(settings.appsScriptUrl, "upsertWeight", {
+        date: recordToSync.date,
+        weekStart: recordToSync.weekStart,
+        person: recordToSync.person,
+        startingWeight: recordToSync.startingWeight,
+        mondayWeighIn: recordToSync.mondayWeight,
+        changeFromPreviousWeek: recordToSync.changeFromPreviousWeek,
+        totalChangeFromStartingWeight: recordToSync.totalChangeFromStartingWeight,
+        timestampSubmitted: recordToSync.submittedAt,
+        lastEditedTimestamp: recordToSync.lastEditedAt,
+      });
+    }
+  }, 100);
+}
 
   function saveStartingWeight(person, weight) {
     setData((prev) => ({
@@ -696,33 +783,58 @@ function App() {
   }
 
   function saveWeeklyReview(form) {
-    const now = new Date().toISOString();
-    const aReport = weeklyCategoryReport("Austin", effectiveData.checkIns);
-    const nReport = weeklyCategoryReport("Nati", effectiveData.checkIns);
-    const record = {
-      weekStart: toKey(weekStart),
-      weekEnd: toKey(weekEnd),
-      combinedScore: combined.score,
-      overallWeekColor: `${combined.status} Week`,
-      strongestSharedCategory: combinedReport.strongest,
-      weakestSharedCategory: combinedReport.weakest,
-      suggestedReset: RESET_SUGGESTIONS[combinedReport.weakest],
-      austinWeeklyScore: combined.austin.score,
-      austinStrongestCategory: aReport.strongest,
-      austinWeakestCategory: aReport.weakest,
-      natiWeeklyScore: combined.nati.score,
-      natiStrongestCategory: nReport.strongest,
-      natiWeakestCategory: nReport.weakest,
-      ...form,
-      submittedAt: now,
-    };
+  const now = new Date().toISOString();
+  const aReport = weeklyCategoryReport("Austin", effectiveData.checkIns);
+  const nReport = weeklyCategoryReport("Nati", effectiveData.checkIns);
 
-    setData((prev) => ({
-      ...prev,
-      weeklyReviews: [...prev.weeklyReviews, record],
-    }));
-  }
+  const record = {
+    weekStart: toKey(weekStart),
+    weekEnd: toKey(weekEnd),
+    combinedScore: combined.score,
+    overallWeekColor: `${combined.status} Week`,
+    strongestSharedCategory: combinedReport.strongest,
+    weakestSharedCategory: combinedReport.weakest,
+    suggestedReset: RESET_SUGGESTIONS[combinedReport.weakest],
+    austinWeeklyScore: combined.austin.score,
+    austinStrongestCategory: aReport.strongest,
+    austinWeakestCategory: aReport.weakest,
+    natiWeeklyScore: combined.nati.score,
+    natiStrongestCategory: nReport.strongest,
+    natiWeakestCategory: nReport.weakest,
+    ...form,
+    submittedAt: now,
+  };
 
+  setData((prev) => ({
+    ...prev,
+    weeklyReviews: [...prev.weeklyReviews, record],
+  }));
+
+    syncToGoogleSheets(settings.appsScriptUrl, "submitWeeklyReview", {
+    weekStart: record.weekStart,
+    weekEnd: record.weekEnd,
+    combinedWeeklyScore: record.combinedScore,
+    overallWeekColor: record.overallWeekColor,
+    strongestSharedCategory: record.strongestSharedCategory,
+    weakestSharedCategory: record.weakestSharedCategory,
+    suggestedResetBeforeFun: record.suggestedReset,
+    austinWeeklyScore: record.austinWeeklyScore,
+    austinStrongestCategory: record.austinStrongestCategory,
+    austinWeakestCategory: record.austinWeakestCategory,
+    natiWeeklyScore: record.natiWeeklyScore,
+    natiStrongestCategory: record.natiStrongestCategory,
+    natiWeakestCategory: record.natiWeakestCategory,
+    whatWentWell: record.whatWentWell,
+    whatNeedsToImprove: record.improveNextWeek,
+    resetBeforeFun: record.resetBeforeFun,
+    funEarned: record.funEarned,
+    notes: record.notes,
+    submittedTimestamp: record.submittedAt,
+  });
+}
+
+function resetLocalData() {
+}
   function resetLocalData() {
     setData(initialData);
     localStorage.removeItem(STORAGE_KEY);
@@ -1779,36 +1891,11 @@ function Settings({
   const [resetPhrase, setResetPhrase] = useState("");
 
   function saveSettings() {
-    setData((prev) => ({ ...prev, settings: local }));
-  }
-
-  if (!adminUnlocked) {
-    return (
-      <GlassCard className="mx-auto max-w-md text-center">
-        <Lock className="mx-auto mb-4 h-10 w-10 text-yellow-300" />
-        <h2 className="text-2xl font-black">Admin Settings</h2>
-        <p className="mt-2 text-sm text-slate-400">Enter PIN to unlock settings.</p>
-        <div className="mt-5">
-          <TextInput
-            type="password"
-            placeholder="Admin PIN"
-            value={pin}
-            onChange={(e) => setPin(e.target.value)}
-          />
-        </div>
-        <div className="mt-4">
-          <PillButton
-            onClick={() => {
-              if (pin === settings.adminPin) setAdminUnlocked(true);
-            }}
-          >
-            Unlock Settings
-          </PillButton>
-        </div>
-      </GlassCard>
-    );
-  }
-
+  setData((prev) => ({ ...prev, settings: local }));
+  syncToGoogleSheets(local.appsScriptUrl, "saveSettings", {
+    settings: local,
+  });
+}
   return (
     <div className="space-y-5">
       <GlassCard>
