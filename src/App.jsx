@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS = {
   austinCalorieCap: 2600,
   adminPin: "2175",
   weeklyFlexBudget: 200,
-  appsScriptUrl: "",
+  appScriptUrl: "https://script.google.com/macros/s/AKfycbwePpjdHAd8ftEykU9UZXLpPSvW_3elc1t0QsAOtKjc2cHNHu7HYdzQ0GVQMmBwFawMqQ/exec",
 };
 
 const TABS = [
