@@ -534,6 +534,159 @@ function dailyPayloadFromRecord(record) {
     timestampSubmitted: record.submittedAt || new Date().toISOString(),
     lastEditedTimestamp: record.lastEditedAt || new Date().toISOString(),
   };
+}function normalizeSheetDate(value) {
+  if (!value) return "";
+
+  const date = new Date(value);
+
+  if (!Number.isNaN(date.getTime())) {
+    return toKey(date);
+  }
+
+  return String(value).slice(0, 10);
+}
+
+function parseBoolean(value) {
+  return value === true || String(value).toLowerCase() === "true";
+}
+
+function safeJsonParse(value) {
+  try {
+    return value ? JSON.parse(value) : {};
+  } catch {
+    return {};
+  }
+}
+
+function sheetRowsToAppData(sheetData, currentSettings) {
+  const dailyRows = sheetData.dailyCheckIns || [];
+  const weeklyRows = sheetData.weeklyReviews || [];
+  const weightRows = sheetData.weightTracking || [];
+  const settingsRows = sheetData.settings || [];
+
+  const pulledSettings = settingsRows.reduce((acc, row) => {
+    if (row.Setting) acc[row.Setting] = row.Value;
+    return acc;
+  }, {});
+
+  const checkIns = dailyRows.map((row) => {
+    const person = row.Person || "";
+    const isAustin = person === "Austin";
+
+    return {
+      date: normalizeSheetDate(row.Date),
+      weekStart: normalizeSheetDate(row["Week Start"]),
+      weekEnd: normalizeSheetDate(row["Week End"]),
+      person,
+      checks: isAustin
+        ? {
+            fitness: parseBoolean(row.Fitness),
+            work: parseBoolean(row["Work/School"]),
+            protein: parseBoolean(row["Nutrition 1"]),
+            calories: parseBoolean(row["Nutrition 2"]),
+            personal: parseBoolean(row["Personal Investment"]),
+          }
+        : {
+            fitness: parseBoolean(row.Fitness),
+            school: parseBoolean(row["Work/School"]),
+            homeMeals: parseBoolean(row["Nutrition 1"]),
+            water: parseBoolean(row["Nutrition 2"]),
+            personal: parseBoolean(row["Personal Investment"]),
+          },
+      details: safeJsonParse(row["Details JSON"]),
+      dailyScore: Number(row["Daily Score"] || 0),
+      submittedAt: row["Timestamp Submitted"] || "",
+      lastEditedAt: row["Last Edited Timestamp"] || "",
+      synced: true,
+    };
+  });
+
+  const weeklyReviews = weeklyRows.map((row) => ({
+    weekStart: normalizeSheetDate(row["Week Start"]),
+    weekEnd: normalizeSheetDate(row["Week End"]),
+    combinedScore: Number(row["Combined Weekly Score"] || 0),
+    overallWeekColor: row["Overall Week Color"] || "",
+    strongestSharedCategory: row["Strongest Shared Category"] || "",
+    weakestSharedCategory: row["Weakest Shared Category"] || "",
+    suggestedReset: row["Suggested Reset Before Fun"] || "",
+    austinWeeklyScore: Number(row["Austin Weekly Score"] || 0),
+    austinStrongestCategory: row["Austin Strongest Category"] || "",
+    austinWeakestCategory: row["Austin Weakest Category"] || "",
+    natiWeeklyScore: Number(row["Nati Weekly Score"] || 0),
+    natiStrongestCategory: row["Nati Strongest Category"] || "",
+    natiWeakestCategory: row["Nati Weakest Category"] || "",
+    whatWentWell: row["What Went Well"] || "",
+    improveNextWeek: row["What Needs To Improve"] || "",
+    resetBeforeFun: row["Reset Before Fun"] || "",
+    funEarned: row["Fun Earned"] || "",
+    notes: row.Notes || "",
+    submittedAt: row["Submitted Timestamp"] || "",
+  }));
+
+  const weights = weightRows.map((row) => ({
+    date: normalizeSheetDate(row.Date),
+    weekStart: normalizeSheetDate(row["Week Start"]),
+    person: row.Person || "",
+    startingWeight: row["Starting Weight"] || "",
+    mondayWeight: row["Monday Weigh-In"] || "",
+    changeFromPreviousWeek: row["Change From Previous Week"] || "",
+    totalChangeFromStartingWeight: row["Total Change From Starting Weight"] || "",
+    submittedAt: row["Timestamp Submitted"] || "",
+    lastEditedAt: row["Last Edited Timestamp"] || "",
+  }));
+
+  const startingWeights = { Austin: null, Nati: null };
+
+  weights.forEach((weight) => {
+    if (weight.person && weight.startingWeight) {
+      startingWeights[weight.person] = weight.startingWeight;
+    }
+  });
+
+  return {
+    settings: {
+      ...currentSettings,
+      ...pulledSettings,
+    },
+    checkIns,
+    weeklyReviews,
+    weights,
+    startingWeights,
+  };
+}
+
+function pullFromGoogleSheets(appsScriptUrl) {
+  return new Promise((resolve, reject) => {
+    if (!appsScriptUrl) {
+      reject(new Error("Missing Apps Script URL."));
+      return;
+    }
+
+    const callbackName = `googleSheetsCallback_${Date.now()}`;
+    const separator = appsScriptUrl.includes("?") ? "&" : "?";
+    const script = document.createElement("script");
+
+    window[callbackName] = (response) => {
+      delete window[callbackName];
+      document.body.removeChild(script);
+
+      if (!response?.success) {
+        reject(new Error(response?.error || "Google Sheets read failed."));
+        return;
+      }
+
+      resolve(response.data);
+    };
+
+    script.onerror = () => {
+      delete window[callbackName];
+      document.body.removeChild(script);
+      reject(new Error("Could not load Google Sheets data."));
+    };
+
+    script.src = `${appsScriptUrl}${separator}action=readAll&callback=${callbackName}`;
+    document.body.appendChild(script);
+  });
 }
 function Ring({ score, label, size = 190, stroke = 16, status, muted = false }) {
   const radius = (size - stroke) / 2;
@@ -832,7 +985,27 @@ function App() {
     submittedTimestamp: record.submittedAt,
   });
 }
+async function handlePullFromSheets() {
+  try {
+    const sheetData = await pullFromGoogleSheets(settings.appsScriptUrl);
+    const converted = sheetRowsToAppData(sheetData, settings);
 
+    setData((prev) => ({
+      ...prev,
+      ...converted,
+      settings: {
+        ...prev.settings,
+        ...converted.settings,
+        appsScriptUrl: settings.appsScriptUrl,
+      },
+    }));
+
+    alert("Google Sheets data pulled successfully.");
+  } catch (error) {
+    console.error(error);
+    alert(`Pull failed: ${error.message}`);
+  }
+}
 function resetLocalData() {
 }
   function resetLocalData() {
@@ -913,15 +1086,16 @@ function resetLocalData() {
 
           {activeTab === "settings" && (
             <Settings
-              data={data}
-              setData={setData}
-              settings={settings}
-              adminUnlocked={adminUnlocked}
-              setAdminUnlocked={setAdminUnlocked}
-              showDemo={showDemo}
-              setShowDemo={setShowDemo}
-              resetLocalData={resetLocalData}
-            />
+  data={data}
+  setData={setData}
+  settings={settings}
+  adminUnlocked={adminUnlocked}
+  setAdminUnlocked={setAdminUnlocked}
+  showDemo={showDemo}
+  setShowDemo={setShowDemo}
+  resetLocalData={resetLocalData}
+  handlePullFromSheets={handlePullFromSheets}
+/>
           )}
         </main>
       </div>
@@ -1885,6 +2059,7 @@ function Settings({
   showDemo,
   setShowDemo,
   resetLocalData,
+  handlePullFromSheets,
 }) {
   const [pin, setPin] = useState("");
   const [local, setLocal] = useState(settings);
@@ -1991,11 +2166,16 @@ function Settings({
       </GlassCard>
 
       <GlassCard>
-        <h2 className="text-xl font-black">Sync Status</h2>
-        <p className="mt-2 text-sm text-slate-400">
-          Google Sheets sync will be connected in the next phase.
-        </p>
-      </GlassCard>
+  <h2 className="text-xl font-black">Sync Status</h2>
+  <p className="mt-2 text-sm text-slate-400">
+    Writes are active. Use pull to load saved Google Sheets data onto this device.
+  </p>
+  <div className="mt-4">
+    <PillButton variant="dark" onClick={handlePullFromSheets}>
+      Pull From Google Sheets
+    </PillButton>
+  </div>
+</GlassCard>
 
       <GlassCard>
         <h2 className="text-xl font-black">Reset Local Data</h2>
