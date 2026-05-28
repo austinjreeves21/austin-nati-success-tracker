@@ -666,7 +666,7 @@ function pullFromGoogleSheets(appScriptUrl) {
     }
 
     const callbackName = `googleSheetsCallback_${Date.now()}`;
-    const separator = appsScriptUrl.includes("?") ? "&" : "?";
+   const separator = finalUrl.includes("?") ? "&" : "?";
     const script = document.createElement("script");
 
     window[callbackName] = (response) => {
