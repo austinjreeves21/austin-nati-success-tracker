@@ -656,9 +656,11 @@ function sheetRowsToAppData(sheetData, currentSettings) {
   };
 }
 
-function pullFromGoogleSheets(appsScriptUrl) {
+function pullFromGoogleSheets(appScriptUrl) {
   return new Promise((resolve, reject) => {
-    if (!appsScriptUrl) {
+    const finalUrl = appScriptUrl || DEFAULT_SETTINGS.appScriptUrl;
+
+    if (!finalUrl) {
       reject(new Error("Missing Apps Script URL."));
       return;
     }
@@ -685,7 +687,7 @@ function pullFromGoogleSheets(appsScriptUrl) {
       reject(new Error("Could not load Google Sheets data."));
     };
 
-    script.src = `${appsScriptUrl}${separator}action=readAll&callback=${callbackName}`;
+  script.src = `${finalUrl}${separator}action=readAll&callback=${callbackName}`;
     document.body.appendChild(script);
   });
 }
